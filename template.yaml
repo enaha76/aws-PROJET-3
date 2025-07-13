@@ -1,6 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
-Description: 'Complete Event-driven text processing pipeline - PROJET-3-GROUP-21029-21076-21047-24265'
+Description: 'Complete text processing pipeline - PROJET-3-GROUP-21029-21076-21047-24265'
 
 Parameters:
   ProjectName:
@@ -11,27 +10,12 @@ Parameters:
   NotificationEmail:
     Type: String
     Description: 'Email address for notifications - CHANGE THIS TO YOUR EMAIL'
-    Default: '21076@supnum.mr'
+    Default: 'admin@example.com'
     AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
     ConstraintDescription: 'Must be a valid email address'
 
-  Environment:
-    Type: String
-    Default: 'production'
-    AllowedValues: ['development', 'staging', 'production']
-    Description: 'Environment name'
-
-Globals:
-  Function:
-    Runtime: python3.9
-    Timeout: 300
-    MemorySize: 512
-    Environment:
-      Variables:
-        LOG_LEVEL: INFO
-
 Resources:
-  # KMS Customer Managed Key for Encryption
+  # KMS Customer Managed Key
   ProcessingKMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -69,8 +53,6 @@ Resources:
           Value: !Sub '${ProjectName}-kms-key'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
         - Key: Service
           Value: 'text-processing'
 
@@ -81,9 +63,509 @@ Resources:
       AliasName: !Sub 'alias/${ProjectName}-processing-key'
       TargetKeyId: !Ref ProcessingKMSKey
 
-  # S3 Bucket for file uploads
+  # DynamoDB Table for metadata storage
+  FileMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-file-metadata-table'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fileId
+          AttributeType: S
+        - AttributeName: fileName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fileId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: FileNameIndex
+          KeySchema:
+            - AttributeName: fileName
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        KMSMasterKeyId: !Ref ProcessingKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-metadata-table'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # SNS Topic for notifications
+  ProcessingNotifications:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-processing-notifications'
+      DisplayName: 'Text Processing Notifications'
+      KmsMasterKeyId: !Ref ProcessingKMSKey
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-notifications'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # SNS Email Subscription
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref ProcessingNotifications
+      Endpoint: !Ref NotificationEmail
+
+  # Dead Letter Queue (SQS)
+  ProcessingDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-processing-dlq'
+      KmsMasterKeyId: !Ref ProcessingKMSKey
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 300
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dlq'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TextProcessingFullPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectAttributes
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub '${ProcessingBucketUploads}/*'
+                  - !Ref ProcessingBucketUploads
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !GetAtt FileMetadataTable.Arn
+                  - !Sub '${FileMetadataTable.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ProcessingNotifications
+              - Effect: Allow
+                Action:
+                  - comprehend:DetectSentiment
+                  - comprehend:DetectEntities
+                  - comprehend:DetectLanguage
+                  - comprehend:DetectKeyPhrases
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:CreateGrant
+                Resource: !GetAtt ProcessingKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ProcessingDeadLetterQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-role'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # Lambda Function with inline code
+  DataProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-data-processor-function'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      DeadLetterConfig:
+        TargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref FileMetadataTable
+          SNS_TOPIC: !Ref ProcessingNotifications
+          KMS_KEY_ID: !Ref ProcessingKMSKey
+          PROJECT_NAME: !Ref ProjectName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import logging
+          from datetime import datetime, timezone
+          import uuid
+          from urllib.parse import unquote_plus
+          from decimal import Decimal
+          import traceback
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize AWS clients
+          s3_client = boto3.client('s3')
+          dynamodb = boto3.resource('dynamodb')
+          sns_client = boto3.client('sns')
+          comprehend_client = boto3.client('comprehend')
+
+          # Environment variables
+          DYNAMODB_TABLE = os.environ['DYNAMODB_TABLE']
+          SNS_TOPIC = os.environ['SNS_TOPIC']
+          PROJECT_NAME = os.environ['PROJECT_NAME']
+
+          # DynamoDB table reference
+          table = dynamodb.Table(DYNAMODB_TABLE)
+
+          def lambda_handler(event, context):
+              """Main Lambda handler for processing text files uploaded to S3."""
+              
+              request_id = context.aws_request_id
+              logger.info(f"[{request_id}] Processing {len(event['Records'])} records")
+              
+              results = []
+              errors = []
+              
+              for i, record in enumerate(event['Records']):
+                  record_id = f"{request_id}-{i}"
+                  try:
+                      result = process_s3_record(record, record_id)
+                      results.append(result)
+                      logger.info(f"[{record_id}] Successfully processed: {result['fileName']}")
+                      
+                  except Exception as e:
+                      error_msg = str(e)
+                      error_details = {
+                          'record_index': i,
+                          'error': error_msg,
+                          'file_key': get_safe_file_key(record),
+                          'timestamp': datetime.now(timezone.utc).isoformat()
+                      }
+                      errors.append(error_details)
+                      logger.error(f"[{record_id}] Error: {error_msg}")
+                      logger.error(f"[{record_id}] Traceback: {traceback.format_exc()}")
+                      continue
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': f'Processed {len(results)} files successfully, {len(errors)} errors',
+                      'results': results,
+                      'errors': errors,
+                      'project': PROJECT_NAME
+                  })
+              }
+
+          def get_safe_file_key(record):
+              """Safely extract file key from S3 record"""
+              try:
+                  return record['s3']['object']['key']
+              except:
+                  return 'unknown'
+
+          def process_s3_record(record, record_id):
+              """Process a single S3 record from the event."""
+              
+              # Extract S3 information
+              bucket = record['s3']['bucket']['name']
+              key = unquote_plus(record['s3']['object']['key'])
+              size = record['s3']['object']['size']
+              
+              logger.info(f"[{record_id}] Processing: {key} ({size} bytes) from {bucket}")
+              
+              # Validate file type
+              if not is_valid_file_type(key):
+                  raise ValueError(f"Unsupported file type: {key}")
+              
+              # Generate unique file ID
+              file_id = str(uuid.uuid4())
+              
+              # Read file content from S3
+              file_content = read_s3_file(bucket, key, record_id)
+              
+              # Validate file content
+              if not file_content or len(file_content.strip()) == 0:
+                  raise ValueError("File is empty or contains no readable text")
+              
+              # Truncate content if too long for Comprehend
+              if len(file_content.encode('utf-8')) > 5000:
+                  file_content = file_content[:4800]
+                  logger.warning(f"[{record_id}] Content truncated for analysis")
+              
+              # Perform sentiment analysis
+              sentiment_result = analyze_sentiment(file_content, record_id)
+              
+              # Extract entities
+              entities_result = extract_entities(file_content, record_id)
+              
+              # Prepare metadata
+              metadata = {
+                  'fileId': file_id,
+                  'fileName': key,
+                  'filePath': f"s3://{bucket}/{key}",
+                  'fileSize': size,
+                  'fileType': get_file_extension(key),
+                  'uploadTime': datetime.now(timezone.utc).isoformat(),
+                  'processingTime': datetime.now(timezone.utc).isoformat(),
+                  'sentimentResult': sentiment_result['Sentiment'],
+                  'sentimentScore': convert_to_decimal(sentiment_result['SentimentScore']),
+                  'entities': entities_result[:5],
+                  'entitiesCount': len(entities_result),
+                  'bucket': bucket,
+                  'projectName': PROJECT_NAME
+              }
+              
+              # Store metadata in DynamoDB
+              store_metadata(metadata, record_id)
+              
+              # Send notification
+              send_notification(metadata, record_id)
+              
+              return {
+                  'status': 'success',
+                  'fileId': file_id,
+                  'fileName': key,
+                  'sentiment': sentiment_result['Sentiment'],
+                  'confidence': round(max(sentiment_result['SentimentScore'].values()), 3)
+              }
+
+          def is_valid_file_type(key):
+              """Check if the file type is supported."""
+              valid_extensions = ['.txt', '.json', '.md']
+              return any(key.lower().endswith(ext) for ext in valid_extensions)
+
+          def get_file_extension(key):
+              """Get file extension from S3 key."""
+              return key.split('.')[-1].lower() if '.' in key else 'unknown'
+
+          def read_s3_file(bucket, key, record_id):
+              """Read file content from S3."""
+              try:
+                  response = s3_client.get_object(Bucket=bucket, Key=key)
+                  content = response['Body'].read()
+                  
+                  # Try to decode as UTF-8
+                  try:
+                      return content.decode('utf-8')
+                  except UnicodeDecodeError:
+                      # Try other encodings
+                      for encoding in ['latin-1', 'cp1252', 'ascii']:
+                          try:
+                              return content.decode(encoding)
+                          except UnicodeDecodeError:
+                              continue
+                      
+                      # Last resort
+                      return content.decode('utf-8', errors='ignore')
+                      
+              except Exception as e:
+                  logger.error(f"[{record_id}] Error reading file {key}: {str(e)}")
+                  raise
+
+          def analyze_sentiment(text, record_id):
+              """Analyze sentiment using Amazon Comprehend."""
+              try:
+                  response = comprehend_client.detect_sentiment(
+                      Text=text,
+                      LanguageCode='en'
+                  )
+                  
+                  logger.info(f"[{record_id}] Sentiment: {response['Sentiment']}")
+                  
+                  return {
+                      'Sentiment': response['Sentiment'],
+                      'SentimentScore': {
+                          'Positive': round(response['SentimentScore']['Positive'], 4),
+                          'Negative': round(response['SentimentScore']['Negative'], 4),
+                          'Neutral': round(response['SentimentScore']['Neutral'], 4),
+                          'Mixed': round(response['SentimentScore']['Mixed'], 4)
+                      }
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"[{record_id}] Sentiment analysis error: {str(e)}")
+                  # Return neutral sentiment if analysis fails
+                  return {
+                      'Sentiment': 'NEUTRAL',
+                      'SentimentScore': {'Positive': 0.0, 'Negative': 0.0, 'Neutral': 1.0, 'Mixed': 0.0}
+                  }
+
+          def extract_entities(text, record_id):
+              """Extract entities using Amazon Comprehend."""
+              try:
+                  response = comprehend_client.detect_entities(
+                      Text=text,
+                      LanguageCode='en'
+                  )
+                  
+                  entities = response['Entities']
+                  
+                  # Filter and sort entities
+                  filtered_entities = []
+                  for entity in entities:
+                      if entity['Score'] >= 0.5:
+                          filtered_entities.append({
+                              'Text': entity['Text'][:100],
+                              'Type': entity['Type'],
+                              'Score': round(entity['Score'], 4)
+                          })
+                  
+                  # Sort by score and take top 10
+                  filtered_entities.sort(key=lambda x: x['Score'], reverse=True)
+                  result = filtered_entities[:10]
+                  
+                  logger.info(f"[{record_id}] Entities found: {len(result)}")
+                  return result
+                  
+              except Exception as e:
+                  logger.error(f"[{record_id}] Entity extraction error: {str(e)}")
+                  return []
+
+          def convert_to_decimal(obj):
+              """Convert float values to Decimal for DynamoDB."""
+              if isinstance(obj, dict):
+                  return {k: convert_to_decimal(v) for k, v in obj.items()}
+              elif isinstance(obj, list):
+                  return [convert_to_decimal(item) for item in obj]
+              elif isinstance(obj, float):
+                  return Decimal(str(round(obj, 6)))
+              else:
+                  return obj
+
+          def store_metadata(metadata, record_id):
+              """Store file metadata in DynamoDB."""
+              try:
+                  processed_metadata = convert_to_decimal(metadata)
+                  table.put_item(Item=processed_metadata)
+                  logger.info(f"[{record_id}] Metadata stored for: {metadata['fileName']}")
+                  
+              except Exception as e:
+                  logger.error(f"[{record_id}] Error storing metadata: {str(e)}")
+                  raise
+
+          def send_notification(metadata, record_id):
+              """Send processing notification via SNS."""
+              try:
+                  sentiment = metadata['sentimentResult']
+                  confidence = max([float(v) for v in metadata['sentimentScore'].values()])
+                  
+                  subject = f"✅ Text Processing Complete - {metadata['fileName']}"
+                  
+                  message = f"""
+          🔍 TEXT PROCESSING SUMMARY
+          ==================================================
+
+          📄 FILE INFORMATION:
+          • File: {metadata['fileName']}
+          • Size: {metadata['fileSize']:,} bytes
+          • Type: {metadata['fileType'].upper()}
+          • Upload Time: {metadata['uploadTime']}
+          • Processing Time: {metadata['processingTime']}
+
+          🧠 AI ANALYSIS RESULTS:
+          • Sentiment: {sentiment} ({confidence:.1%} confidence)
+          • Entities Found: {metadata['entitiesCount']}
+
+          📊 DETAILED SENTIMENT SCORES:
+          • Positive: {metadata['sentimentScore']['Positive']:.3f}
+          • Negative: {metadata['sentimentScore']['Negative']:.3f}
+          • Neutral: {metadata['sentimentScore']['Neutral']:.3f}
+          • Mixed: {metadata['sentimentScore']['Mixed']:.3f}
+
+          🏷️ TOP ENTITIES DETECTED:
+          {format_entities(metadata['entities'])}
+
+          📍 TECHNICAL DETAILS:
+          • File ID: {metadata['fileId']}
+          • S3 Location: {metadata['filePath']}
+          • Project: {metadata['projectName']}
+          """
+                  
+                  # Send notification
+                  sns_client.publish(
+                      TopicArn=SNS_TOPIC,
+                      Message=message,
+                      Subject=subject
+                  )
+                  
+                  logger.info(f"[{record_id}] Notification sent for: {metadata['fileName']}")
+                  
+              except Exception as e:
+                  logger.error(f"[{record_id}] Notification error: {str(e)}")
+
+          def format_entities(entities):
+              """Format entities list for notification message."""
+              if not entities:
+                  return "   No high-confidence entities detected"
+              
+              formatted = []
+              for i, entity in enumerate(entities[:5], 1):
+                  confidence_bar = "█" * int(entity['Score'] * 10)
+                  formatted.append(
+                      f"   {i}. {entity['Text']} ({entity['Type']}) "
+                      f"[{confidence_bar}] {entity['Score']:.3f}"
+                  )
+              
+              return "\n".join(formatted)
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-data-processor'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # S3 Bucket for file uploads (created after Lambda to avoid circular dependency)
   ProcessingBucketUploads:
     Type: AWS::S3::Bucket
+    DependsOn: S3InvokeLambdaPermission
     Properties:
       BucketName: !Sub '${ProjectName}-uploads-${AWS::AccountId}-${AWS::Region}'
       BucketEncryption:
@@ -127,164 +609,8 @@ Resources:
           Value: !Sub '${ProjectName}-uploads-bucket'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
         - Key: Service
           Value: 'text-processing'
-
-  # S3 Bucket Policy
-  ProcessingBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref ProcessingBucketUploads
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: DenyInsecureConnections
-            Effect: Deny
-            Principal: '*'
-            Action: 's3:*'
-            Resource:
-              - !Sub '${ProcessingBucketUploads}/*'
-              - !Ref ProcessingBucketUploads
-            Condition:
-              Bool:
-                'aws:SecureTransport': 'false'
-
-  # DynamoDB Table for metadata storage
-  FileMetadataTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub '${ProjectName}-file-metadata-table'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: fileId
-          AttributeType: S
-        - AttributeName: fileName
-          AttributeType: S
-      KeySchema:
-        - AttributeName: fileId
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: FileNameIndex
-          KeySchema:
-            - AttributeName: fileName
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
-      SSESpecification:
-        SSEEnabled: true
-        KMSMasterKeyId: !Ref ProcessingKMSKey
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-metadata-table'
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: 'text-processing'
-
-  # SNS Topic for notifications
-  ProcessingNotifications:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub '${ProjectName}-processing-notifications'
-      DisplayName: 'Text Processing Notifications'
-      KmsMasterKeyId: !Ref ProcessingKMSKey
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-notifications'
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: 'text-processing'
-
-  # SNS Email Subscription
-  EmailSubscription:
-    Type: AWS::SNS::Subscription
-    Properties:
-      Protocol: email
-      TopicArn: !Ref ProcessingNotifications
-      Endpoint: !Ref NotificationEmail
-
-  # Dead Letter Queue (SQS)
-  ProcessingDeadLetterQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: !Sub '${ProjectName}-processing-dlq'
-      KmsMasterKeyId: !Ref ProcessingKMSKey
-      MessageRetentionPeriod: 1209600  # 14 days
-      VisibilityTimeoutSeconds: 300
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-dlq'
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: 'text-processing'
-
-  # Lambda Function
-  DataProcessorFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub '${ProjectName}-data-processor-function'
-      CodeUri: src/
-      Handler: lambda_function.lambda_handler
-      Runtime: python3.9
-      MemorySize: 512
-      Timeout: 300
-      Environment:
-        Variables:
-          DYNAMODB_TABLE: !Ref FileMetadataTable
-          SNS_TOPIC: !Ref ProcessingNotifications
-          KMS_KEY_ID: !Ref ProcessingKMSKey
-          PROJECT_NAME: !Ref ProjectName
-          ENVIRONMENT: !Ref Environment
-      DeadLetterQueue:
-        Type: SQS
-        TargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
-      ReservedConcurrencyLimit: 10
-      Tracing: Active
-      Policies:
-        - S3ReadPolicy:
-            BucketName: !Ref ProcessingBucketUploads
-        - DynamoDBWritePolicy:
-            TableName: !Ref FileMetadataTable
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt ProcessingNotifications.TopicName
-        - SQSSendMessagePolicy:
-            QueueName: !GetAtt ProcessingDeadLetterQueue.QueueName
-        - KMSDecryptPolicy:
-            KeyId: !Ref ProcessingKMSKey
-        - Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Action:
-                - comprehend:DetectSentiment
-                - comprehend:DetectEntities
-                - comprehend:DetectLanguage
-                - comprehend:DetectKeyPhrases
-              Resource: '*'
-            - Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: '*'
-      Tags:
-        Name: !Sub '${ProjectName}-data-processor'
-        Project: !Ref ProjectName
-        Environment: !Ref Environment
-        Service: 'text-processing'
 
   # Lambda Permission for S3
   S3InvokeLambdaPermission:
@@ -293,7 +619,7 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !Ref DataProcessorFunction
       Principal: s3.amazonaws.com
-      SourceArn: !Sub '${ProcessingBucketUploads}/*'
+      SourceAccount: !Ref AWS::AccountId
 
   # CloudWatch Log Group
   LambdaLogGroup:
@@ -307,8 +633,6 @@ Resources:
           Value: !Sub '${ProjectName}-lambda-logs'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
         - Key: Service
           Value: 'text-processing'
 
@@ -325,25 +649,6 @@ Resources:
       EvaluationPeriods: 2
       Threshold: 3
       ComparisonOperator: GreaterThanOrEqualToThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref DataProcessorFunction
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-
-  LambdaDurationAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-lambda-duration'
-      AlarmDescription: 'Lambda function duration alarm'
-      MetricName: Duration
-      Namespace: AWS/Lambda
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 240000  # 4 minutes in milliseconds
-      ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: FunctionName
           Value: !Ref DataProcessorFunction
@@ -370,37 +675,12 @@ Resources:
         - !Ref ProcessingNotifications
       TreatMissingData: notBreaching
 
-  DynamoDBThrottleAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-dynamodb-throttles'
-      AlarmDescription: 'DynamoDB throttle events alarm'
-      MetricName: ThrottledRequests
-      Namespace: AWS/DynamoDB
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 5
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: TableName
-          Value: !Ref FileMetadataTable
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-
 Outputs:
   S3BucketName:
     Description: 'Name of the S3 bucket for uploads'
     Value: !Ref ProcessingBucketUploads
     Export:
       Name: !Sub '${AWS::StackName}-S3Bucket'
-
-  S3BucketRegion:
-    Description: 'Region of the S3 bucket'
-    Value: !Ref AWS::Region
-    Export:
-      Name: !Sub '${AWS::StackName}-S3BucketRegion'
 
   DynamoDBTableName:
     Description: 'Name of the DynamoDB table'
@@ -414,12 +694,6 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-LambdaFunction'
 
-  LambdaFunctionArn:
-    Description: 'ARN of the Lambda function'
-    Value: !GetAtt DataProcessorFunction.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-LambdaFunctionArn'
-
   SNSTopicArn:
     Description: 'ARN of the SNS topic'
     Value: !Ref ProcessingNotifications
@@ -432,20 +706,8 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-KMSKey'
 
-  KMSKeyArn:
-    Description: 'ARN of the KMS key'
-    Value: !GetAtt ProcessingKMSKey.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-KMSKeyArn'
-
-  DeadLetterQueueUrl:
-    Description: 'URL of the Dead Letter Queue'
-    Value: !Ref ProcessingDeadLetterQueue
-    Export:
-      Name: !Sub '${AWS::StackName}-DLQ'
-
   ProjectInfo:
     Description: 'Project information'
-    Value: !Sub '${ProjectName} deployed in ${Environment} environment'
+    Value: !Sub '${ProjectName} deployed successfully'
     Export:
       Name: !Sub '${AWS::StackName}-ProjectInfo'
