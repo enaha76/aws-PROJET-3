@@ -10,7 +10,7 @@ Parameters:
   NotificationEmail:
     Type: String
     Description: 'Email address for notifications - CHANGE THIS TO YOUR EMAIL'
-    Default: 'admin@example.com'
+    Default: '2176@supnum.mr'
     AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
     ConstraintDescription: 'Must be a valid email address'
 
