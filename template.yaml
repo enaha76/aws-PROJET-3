@@ -10,12 +10,12 @@ Parameters:
   NotificationEmail:
     Type: String
     Description: 'Email address for notifications - CHANGE THIS TO YOUR EMAIL'
-    Default: '2176@supnum.mr'
+    Default: '21076@supnum.mr'
     AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
     ConstraintDescription: 'Must be a valid email address'
 
 Resources:
-  # KMS Customer Managed Key
+  # KMS Customer Managed Key (independent resource)
   ProcessingKMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -63,7 +63,7 @@ Resources:
       AliasName: !Sub 'alias/${ProjectName}-processing-key'
       TargetKeyId: !Ref ProcessingKMSKey
 
-  # DynamoDB Table for metadata storage
+  # DynamoDB Table (independent resource)
   FileMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -99,7 +99,7 @@ Resources:
         - Key: Service
           Value: 'text-processing'
 
-  # SNS Topic for notifications
+  # SNS Topic (independent resource)
   ProcessingNotifications:
     Type: AWS::SNS::Topic
     Properties:
@@ -122,7 +122,7 @@ Resources:
       TopicArn: !Ref ProcessingNotifications
       Endpoint: !Ref NotificationEmail
 
-  # Dead Letter Queue (SQS)
+  # Dead Letter Queue (independent resource)
   ProcessingDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -138,7 +138,7 @@ Resources:
         - Key: Service
           Value: 'text-processing'
 
-  # Lambda Execution Role
+  # Lambda Execution Role (must be created before Lambda function)
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -164,8 +164,8 @@ Resources:
                   - s3:GetObjectAttributes
                   - s3:ListBucket
                 Resource: 
-                  - !Sub '${ProcessingBucketUploads}/*'
-                  - !Ref ProcessingBucketUploads
+                  - !Sub 'arn:aws:s3:::${ProjectName}-uploads-${AWS::AccountId}-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::${ProjectName}-uploads-${AWS::AccountId}-${AWS::Region}'
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -192,7 +192,7 @@ Resources:
                   - kms:Decrypt
                   - kms:DescribeKey
                   - kms:Encrypt
-                  - kms:GenerateDataKey 
+                  - kms:GenerateDataKey
                   - kms:CreateGrant
                 Resource: !GetAtt ProcessingKMSKey.Arn
               - Effect: Allow
@@ -216,9 +216,27 @@ Resources:
         - Key: Service
           Value: 'text-processing'
 
-  # Lambda Function with inline code
+  # CloudWatch Log Group (created before Lambda function)
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-data-processor-function'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt ProcessingKMSKey.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-logs'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: 'text-processing'
+
+  # Lambda Function (depends on Role and Log Group)
   DataProcessorFunction:
     Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaLogGroup
+      - LambdaExecutionRole
     Properties:
       FunctionName: !Sub '${ProjectName}-data-processor-function'
       Runtime: python3.9
@@ -562,7 +580,17 @@ Resources:
         - Key: Service
           Value: 'text-processing'
 
-  # S3 Bucket for file uploads (created after Lambda to avoid circular dependency)
+  # Lambda Permission for S3 (created after Lambda function)
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: DataProcessorFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DataProcessorFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # S3 Bucket (created after Lambda permission to avoid circular dependency)
   ProcessingBucketUploads:
     Type: AWS::S3::Bucket
     DependsOn: S3InvokeLambdaPermission
@@ -612,33 +640,10 @@ Resources:
         - Key: Service
           Value: 'text-processing'
 
-  # Lambda Permission for S3
-  S3InvokeLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref DataProcessorFunction
-      Principal: s3.amazonaws.com
-      SourceAccount: !Ref AWS::AccountId
-
-  # CloudWatch Log Group
-  LambdaLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/aws/lambda/${DataProcessorFunction}'
-      RetentionInDays: 30
-      KmsKeyId: !GetAtt ProcessingKMSKey.Arn
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-lambda-logs'
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Service
-          Value: 'text-processing'
-
-  # CloudWatch Alarms
+  # CloudWatch Alarms (created after Lambda function exists)
   LambdaErrorAlarm:
     Type: AWS::CloudWatch::Alarm
+    DependsOn: DataProcessorFunction
     Properties:
       AlarmName: !Sub '${ProjectName}-lambda-errors'
       AlarmDescription: 'Lambda function error rate alarm'
