@@ -1,0 +1,16 @@
+# AWS SDK for Python
+boto3==1.34.84
+botocore==1.34.84
+
+# HTTP library (required by boto3)
+urllib3==1.26.18
+
+# JSON processing (built-in, but ensuring compatibility)
+# datetime, uuid, logging, os, re, traceback are built-in modules
+
+# Optional: For enhanced JSON processing (uncomment if needed)
+# jsonschema==4.21.1
+
+# Optional: For advanced text processing (uncomment if needed)
+# nltk==3.8.1
+# textblob==0.17.1

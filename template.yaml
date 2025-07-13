@@ -1,1 +1,678 @@
-# setup
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Complete Event-driven text processing pipeline - PROJET-3-GROUP-21029-21076-21047-24265'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'PROJET-3-GROUP-21029-21076-21047-24265'
+    Description: 'Project identifier'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for notifications'
+    Default: '21076@supnum.mr'
+    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+    ConstraintDescription: 'Must be a valid email address'
+
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 300
+    MemorySize: 512
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        ENVIRONMENT: !Ref Environment
+
+Resources:
+  # KMS Customer Managed Key for Encryption
+  ProcessingKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for text processing pipeline encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow services to use the key
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+                - dynamodb.amazonaws.com
+                - sns.amazonaws.com
+                - lambda.amazonaws.com
+                - logs.amazonaws.com
+                - sqs.amazonaws.com
+                - cloudtrail.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncrypt*
+              - kms:CreateGrant
+            Resource: '*'
+          - Sid: Allow Lambda function to use the key
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-kms-key'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'security'
+
+  # KMS Key Alias
+  ProcessingKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-processing-key'
+      TargetKeyId: !Ref ProcessingKMSKey
+
+  # S3 Bucket for Logging (must be created first)
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ProcessingKMSKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-logging-bucket'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'storage'
+
+  # S3 Bucket for file uploads
+  ProcessingBucketUploads:
+    Type: AWS::S3::Bucket
+    DependsOn: DataProcessorFunction
+    Properties:
+      BucketName: !Sub '${ProjectName}-uploads-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ProcessingKMSKey
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: 'access-logs/'
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt DataProcessorFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .txt
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt DataProcessorFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt DataProcessorFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .md
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, DELETE]
+            AllowedOrigins: ['*']
+            MaxAge: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-uploads-bucket'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'storage'
+
+  # S3 Bucket Policy
+  ProcessingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProcessingBucketUploads
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub '${ProcessingBucketUploads}/*'
+              - !Ref ProcessingBucketUploads
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetObjectAttributes'
+            Resource: !Sub '${ProcessingBucketUploads}/*'
+          - Sid: AllowLambdaBucketAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - 's3:ListBucket'
+            Resource: !Ref ProcessingBucketUploads
+
+  # DynamoDB Table for metadata storage
+  FileMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-file-metadata-table'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fileId
+          AttributeType: S
+        - AttributeName: fileName
+          AttributeType: S
+        - AttributeName: uploadTime
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fileId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: FileNameIndex
+          KeySchema:
+            - AttributeName: fileName
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: UploadTimeIndex
+          KeySchema:
+            - AttributeName: uploadTime
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        KMSMasterKeyId: !Ref ProcessingKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-metadata-table'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'database'
+
+  # Dead Letter Queue (SQS) - Must be created before Lambda
+  ProcessingDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-dlq'
+      KmsMasterKeyId: !Ref ProcessingKMSKey
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 300
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dlq'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'queue'
+
+  # SNS Topic for notifications
+  ProcessingNotifications:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-notifications'
+      DisplayName: 'Text Processing Notifications'
+      KmsMasterKeyId: !Ref ProcessingKMSKey
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-notifications'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'messaging'
+
+  # SNS Topic Policy
+  ProcessingNotificationsPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ProcessingNotifications
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLambdaPublish
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - sns:Publish
+            Resource: !Ref ProcessingNotifications
+          - Sid: AllowCloudWatchAlarmsPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - sns:Publish
+            Resource: !Ref ProcessingNotifications
+
+  # SNS Email Subscription
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref ProcessingNotifications
+      Endpoint: !Ref NotificationEmail
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TextProcessingFullPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetObjectAttributes
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub '${ProcessingBucketUploads}/*'
+                  - !Ref ProcessingBucketUploads
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !GetAtt FileMetadataTable.Arn
+                  - !Sub '${FileMetadataTable.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ProcessingNotifications
+              - Effect: Allow
+                Action:
+                  - comprehend:DetectSentiment
+                  - comprehend:DetectEntities
+                  - comprehend:DetectLanguage
+                  - comprehend:DetectKeyPhrases
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:CreateGrant
+                Resource: !GetAtt ProcessingKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ProcessingDeadLetterQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-role'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'security'
+
+  # CloudWatch Log Group for Lambda
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-data-processor'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt ProcessingKMSKey.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-logs'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'monitoring'
+
+  # Lambda Function
+  DataProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-data-processor'
+      CodeUri: src/
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref FileMetadataTable
+          SNS_TOPIC: !Ref ProcessingNotifications
+          KMS_KEY_ID: !Ref ProcessingKMSKey
+          LOG_LEVEL: INFO
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
+      ReservedConcurrencyLimit: 10
+      Tracing: Active
+      Tags:
+        Name: !Sub '${ProjectName}-data-processor'
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
+        Service: 'text-processing'
+        Component: 'compute'
+
+  # Lambda Permission for S3
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DataProcessorFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub '${ProcessingBucketUploads}/*'
+
+  # CloudTrail for API auditing
+  ProcessingCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: LoggingBucket
+    Properties:
+      TrailName: !Sub '${ProjectName}-audit-trail'
+      S3BucketName: !Ref LoggingBucket
+      S3KeyPrefix: 'cloudtrail-logs/'
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: false
+      EnableLogFileValidation: true
+      KMSKeyId: !Ref ProcessingKMSKey
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub '${ProcessingBucketUploads}/*'
+            - Type: AWS::DynamoDB::Table
+              Values:
+                - !GetAtt FileMetadataTable.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-audit-trail'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: 'text-processing'
+        - Key: Component
+          Value: 'security'
+
+  # CloudWatch Alarms
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-lambda-errors'
+      AlarmDescription: 'Lambda function error rate alarm'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DataProcessorFunction
+      AlarmActions:
+        - !Ref ProcessingNotifications
+      TreatMissingData: notBreaching
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-lambda-duration'
+      AlarmDescription: 'Lambda function duration alarm'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 240000  # 4 minutes in milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DataProcessorFunction
+      AlarmActions:
+        - !Ref ProcessingNotifications
+      TreatMissingData: notBreaching
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-dlq-messages'
+      AlarmDescription: 'Dead Letter Queue messages alarm'
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ProcessingDeadLetterQueue.QueueName
+      AlarmActions:
+        - !Ref ProcessingNotifications
+      TreatMissingData: notBreaching
+
+  # DynamoDB Alarms
+  DynamoDBThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-dynamodb-throttles'
+      AlarmDescription: 'DynamoDB throttle events alarm'
+      MetricName: ThrottledRequests
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref FileMetadataTable
+      AlarmActions:
+        - !Ref ProcessingNotifications
+      TreatMissingData: notBreaching
+
+Outputs:
+  S3BucketName:
+    Description: 'Name of the S3 bucket for uploads'
+    Value: !Ref ProcessingBucketUploads
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'
+
+  S3BucketRegion:
+    Description: 'Region of the S3 bucket'
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketRegion'
+
+  DynamoDBTableName:
+    Description: 'Name of the DynamoDB table'
+    Value: !Ref FileMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DynamoDBTable'
+
+  LambdaFunctionName:
+    Description: 'Name of the Lambda function'
+    Value: !Ref DataProcessorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  LambdaFunctionArn:
+    Description: 'ARN of the Lambda function'
+    Value: !GetAtt DataProcessorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionArn'
+
+  SNSTopicArn:
+    Description: 'ARN of the SNS topic'
+    Value: !Ref ProcessingNotifications
+    Export:
+      Name: !Sub '${AWS::StackName}-SNSTopic'
+
+  KMSKeyId:
+    Description: 'ID of the KMS key'
+    Value: !Ref ProcessingKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKey'
+
+  KMSKeyArn:
+    Description: 'ARN of the KMS key'
+    Value: !GetAtt ProcessingKMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
+
+  DeadLetterQueueUrl:
+    Description: 'URL of the Dead Letter Queue'
+    Value: !Ref ProcessingDeadLetterQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-DLQ'
+
+  LoggingBucketName:
+    Description: 'Name of the logging bucket'
+    Value: !Ref LoggingBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LoggingBucket'
+
+  CloudTrailArn:
+    Description: 'ARN of the CloudTrail'
+    Value: !GetAtt ProcessingCloudTrail.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudTrail'
+
+  ProjectInfo:
+    Description: 'Project information'
+    Value: !Sub '${ProjectName} deployed in ${Environment} environment'
+    Export:
+      Name: !Sub '${AWS::StackName}-ProjectInfo'
