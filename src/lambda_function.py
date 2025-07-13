@@ -44,9 +44,7 @@ except Exception as e:
 # Environment variables with defaults
 DYNAMODB_TABLE = os.environ.get('DYNAMODB_TABLE')
 SNS_TOPIC = os.environ.get('SNS_TOPIC')
-KMS_KEY_ID = os.environ.get('KMS_KEY_ID')
 PROJECT_NAME = os.environ.get('PROJECT_NAME', 'PROJET-3-GROUP-21029-21076-21047-24265')
-ENVIRONMENT = os.environ.get('ENVIRONMENT', 'production')
 
 # Validate required environment variables
 required_env_vars = ['DYNAMODB_TABLE', 'SNS_TOPIC']
@@ -175,8 +173,7 @@ def create_response(status_code: int, message: str, results: List[Dict], errors:
             },
             'results': results,
             'errors': errors,
-            'project': PROJECT_NAME,
-            'environment': ENVIRONMENT
+            'project': PROJECT_NAME
         }, default=str)
     }
 
@@ -618,7 +615,6 @@ def create_metadata(file_id: str, key: str, size: int, bucket: str, content: str
         'language': language_result,
         'bucket': bucket,
         'projectName': PROJECT_NAME,
-        'environment': ENVIRONMENT,
         'version': '1.0.0',
         'ttl': int((now.timestamp() + (365 * 24 * 60 * 60)))  # 1 year TTL
     }
@@ -757,10 +753,11 @@ def format_notification_message(metadata: Dict[str, Any], sentiment: str, confid
 • File ID: {metadata['fileId']}
 • S3 Location: {metadata['filePath']}
 • Project: {metadata['projectName']}
-• Environment: {metadata['environment']}
-• Processing Version: {metadata['version']}
+• Version: {metadata['version']}
 
 💡 Need help? Check the AWS Console for detailed logs and metrics.
+
+🚀 Processed successfully by AWS serverless architecture!
 """
     
     return message
@@ -832,6 +829,5 @@ except Exception as e:
 
 logger.info("Lambda function initialized successfully")
 logger.info(f"Project: {PROJECT_NAME}")
-logger.info(f"Environment: {ENVIRONMENT}")
 logger.info(f"Supported file types: {SUPPORTED_FILE_EXTENSIONS}")
 logger.info(f"Max file size: {MAX_FILE_SIZE:,} bytes")
