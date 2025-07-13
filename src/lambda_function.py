@@ -17,7 +17,7 @@ import logging
 import traceback
 from datetime import datetime, timezone
 import uuid
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from urllib.parse import unquote_plus
 import re
 from decimal import Decimal
@@ -49,7 +49,7 @@ PROJECT_NAME = os.environ.get('PROJECT_NAME', 'PROJET-3-GROUP-21029-21076-21047-
 ENVIRONMENT = os.environ.get('ENVIRONMENT', 'production')
 
 # Validate required environment variables
-required_env_vars = ['DYNAMODB_TABLE', 'SNS_TOPIC', 'KMS_KEY_ID']
+required_env_vars = ['DYNAMODB_TABLE', 'SNS_TOPIC']
 missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
 if missing_vars:
     raise ValueError(f"Missing required environment variables: {missing_vars}")
@@ -66,27 +66,6 @@ SUPPORTED_FILE_EXTENSIONS = ['.txt', '.json', '.md']
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_COMPREHEND_TEXT_LENGTH = 5000  # Amazon Comprehend limit
 TRUNCATE_LENGTH = 4800  # Leave buffer for safety
-
-# Custom exceptions
-class ProcessingError(Exception):
-    """Custom exception for processing errors"""
-    pass
-
-class FileValidationError(ProcessingError):
-    """Custom exception for file validation errors"""
-    pass
-
-class ComprehendError(ProcessingError):
-    """Custom exception for Comprehend service errors"""
-    pass
-
-class DynamoDBError(ProcessingError):
-    """Custom exception for DynamoDB errors"""
-    pass
-
-class SNSError(ProcessingError):
-    """Custom exception for SNS errors"""
-    pass
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
@@ -718,7 +697,7 @@ def send_notification(metadata: Dict[str, Any], record_id: str) -> None:
     try:
         # Prepare notification content
         sentiment = metadata['sentimentResult']
-        confidence = max(metadata['sentimentScore'].values())
+        confidence = max([float(v) for v in metadata['sentimentScore'].values()])
         
         subject = f"✅ Text Processing Complete - {metadata['fileName']}"
         
@@ -800,6 +779,27 @@ def format_entities_for_notification(entities: List[Dict]) -> str:
         )
     
     return "\n".join(formatted)
+
+# Custom exceptions
+class ProcessingError(Exception):
+    """Custom exception for processing errors"""
+    pass
+
+class FileValidationError(ProcessingError):
+    """Custom exception for file validation errors"""
+    pass
+
+class ComprehendError(ProcessingError):
+    """Custom exception for Comprehend service errors"""
+    pass
+
+class DynamoDBError(ProcessingError):
+    """Custom exception for DynamoDB errors"""
+    pass
+
+class SNSError(ProcessingError):
+    """Custom exception for SNS errors"""
+    pass
 
 # Health check and utility functions
 def validate_environment() -> None:
