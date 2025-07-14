@@ -1,25 +1,20 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Complete infrastructure for an event-driven data processing pipeline using S3, Lambda,
-  DynamoDB, SNS, and Comprehend. (v2 - Fixes circular dependency)
+  Task 1 of 3: Building the foundation - Security (KMS), Storage (DynamoDB),
+  and Notifications (SNS, SQS).
 
 Parameters:
-  LogLevel:
-    Type: String
-    Default: INFO
-    AllowedValues: [INFO, DEBUG, WARN, ERROR]
-    Description: Log level for the Lambda function.
   ProjectName:
     Type: String
     Default: PROJET-3
-    Description: The name of the project, used for resource naming and tagging.
+    Description: A name for your project, used to name all the resources.
 
 Resources:
-  # 1. KMS Key for encrypting the SNS Topic
+  # --- 1. The Master Key to lock everything ---
   KMSKey:
     Type: AWS::KMS::Key
     Properties:
-      Description: KMS key for encrypting the SNS topic for the processing pipeline.
+      Description: !Sub "KMS key for ${ProjectName}"
       EnableKeyRotation: true
       KeyPolicy:
         Version: '2012-10-17'
@@ -34,26 +29,8 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
-  # 2. S3 Bucket to receive file uploads and trigger the Lambda
-  S3Bucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${ProjectName}-processing-bucket"
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: 's3:ObjectCreated:*'
-            Function: !GetAtt LambdaFunction.Arn
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # 3. DynamoDB Table to store file metadata
-  DynamoDBTable:
+  # --- 2. The Database to store results ---
+  FileMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "${ProjectName}-FileMetadata"
@@ -66,12 +43,13 @@ Resources:
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
+        KMSMasterKeyId: !Ref KMSKey
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # 4. SNS Topic for sending notifications
-  SNSTopic:
+  # --- 3. The Notification Service ---
+  ProcessingNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub "${ProjectName}-ProcessingNotifications"
@@ -80,103 +58,26 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
-  # 5. IAM Role for the Lambda Function
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
+  # --- 4. The "Mailbox" for failed Lambda executions ---
+  FailedExecutionsQueue:
+    Type: AWS::SQS::Queue
     Properties:
-      RoleName: !Sub "${ProjectName}-LambdaExecutionRole"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: !Sub "${ProjectName}-LambdaPermissions"
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: AllowLogging
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
-              - Sid: S3ReadAccess
-                Effect: Allow
-                Action: s3:GetObject
-                Resource: !Sub "${S3Bucket.Arn}/*"
-              - Sid: DynamoDBWriteAccess
-                Effect: Allow
-                Action: dynamodb:PutItem
-                Resource: !GetAtt DynamoDBTable.Arn
-              - Sid: SNSPublishAccess
-                Effect: Allow
-                Action: sns:Publish
-                Resource: !Ref SNSTopic
-              - Sid: ComprehendAccess
-                Effect: Allow
-                Action:
-                  - comprehend:DetectSentiment
-                  - comprehend:DetectEntities
-                  - comprehend:DetectDominantLanguage
-                Resource: "*"
-              - Sid: KMSAccess
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:GenerateDataKey*
-                Resource: !GetAtt KMSKey.Arn
-
-  # 6. The Lambda Function itself
-  LambdaFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub "${ProjectName}-DataProcessorFunction"
-      Handler: lambda_function.lambda_handler
-      Runtime: python3.12
-      Role: !GetAtt LambdaExecutionRole.Arn
-      # This inline code is a placeholder. CodePipeline will replace it with your actual code.
-      Code:
-        ZipFile: |
-          import json
-          def lambda_handler(event, context):
-              print("This is a placeholder function. Code will be updated by the pipeline.")
-              return {'statusCode': 200, 'body': json.dumps('Placeholder')}
-      Environment:
-        Variables:
-          DYNAMODB_TABLE: !Ref DynamoDBTable
-          SNS_TOPIC: !Ref SNSTopic
-          KMS_KEY_ID: !Ref KMSKey
-          LOG_LEVEL: !Ref LogLevel
-      Timeout: 60
-      MemorySize: 256
+      QueueName: !Sub "${ProjectName}-FailedExecutionsQueue"
+      KmsMasterKeyId: !Ref KMSKey
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # 7. Permission for S3 to invoke the Lambda function
-  S3InvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt LambdaFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: s3.amazonaws.com
-      SourceArn: !GetAtt S3Bucket.Arn
-      SourceAccount: !Ref AWS::AccountId
-
 Outputs:
-  S3BucketName:
-    Description: Name of the S3 bucket for file uploads.
-    Value: !Ref S3Bucket
+  KMSKeyArn:
+    Description: ARN of the master KMS Key.
+    Value: !GetAtt KMSKey.Arn
   DynamoDBTableName:
-    Description: Name of the DynamoDB table for metadata.
-    Value: !Ref DynamoDBTable
+    Description: Name of the DynamoDB table.
+    Value: !Ref FileMetadataTable
   SNSTopicArn:
-    Description: ARN of the SNS topic for notifications.
-    Value: !Ref SNSTopic
-  LambdaFunctionArn:
-    Description: ARN of the data processing Lambda function.
-    Value: !GetAtt LambdaFunction.Arn 
+    Description: ARN of the SNS topic.
+    Value: !Ref ProcessingNotificationTopic
+  DeadLetterQueueArn:
+    Description: ARN of the Dead Letter Queue.
+    Value: !GetAtt FailedExecutionsQueue.Arn
