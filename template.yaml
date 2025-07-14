@@ -1,108 +1,63 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Task 1 of 3: Building the foundation - Security (KMS), Storage (DynamoDB), 
-  and Notifications (SNS, SQS). v2 - Fixes KMS policy.
-
-Parameters:
-  ProjectName:
-    Type: String
-    Default: PROJET-3
-    Description: A name for your project, used to name all the resources.
-  CodePipelineRoleArn:
-    Type: String
-    Description: The full ARN of the IAM role used by the CodePipeline Deploy stage.
+Description: 'Stage 1 of 3: Foundation - KMS Key, DynamoDB Table, SNS Topic, and SQS Queue.'
 
 Resources:
-  # --- 1. The Master Key to lock everything ---
+  # The master key that will encrypt everything
   KMSKey:
     Type: AWS::KMS::Key
     Properties:
-      Description: !Sub "KMS key for ${ProjectName}"
+      Description: 'Customer Managed Key for the text processing project'
       EnableKeyRotation: true
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
-          # Statement 1: Allows the account root user full control
-          - Sid: AllowRootUserToAdministerKey
-            Effect: Allow
+          - Sid: 'AllowRootUserToAdministerKey'
+            Effect: 'Allow'
             Principal:
-              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
-            Action: "kms:*"
-            Resource: "*"
-          # Statement 2 (FIX): Allows the pipeline's role to manage the key
-          - Sid: AllowPipelineRoleToManageKey
-            Effect: Allow
-            Principal:
-              AWS: !Ref CodePipelineRoleArn
-            Action:
-              - "kms:Create*"
-              - "kms:Describe*"
-              - "kms:Enable*"
-              - "kms:List*"
-              - "kms:Put*"
-              - "kms:Update*"
-              - "kms:Revoke*"
-              - "kms:Disable*"
-              - "kms:Get*"
-              - "kms:Delete*"
-              - "kms:TagResource"
-              - "kms:UntagResource"
-              - "kms:ScheduleKeyDeletion"
-              - "kms:CancelKeyDeletion"
-            Resource: "*"
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
 
-  # --- 2. The Database to store results ---
+  # The "filing cabinet" for storing results, encrypted with our key
   FileMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "${ProjectName}-FileMetadata"
+      TableName: 'file-metadata-table'
       AttributeDefinitions:
-        - AttributeName: fileId
-          AttributeType: S
+        - AttributeName: 'fileId'
+          AttributeType: 'S'
       KeySchema:
-        - AttributeName: fileId
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
+        - AttributeName: 'fileId'
+          KeyType: 'HASH'
+      BillingMode: 'PAY_PER_REQUEST'
       SSESpecification:
         SSEEnabled: true
         KMSMasterKeyId: !Ref KMSKey
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
 
-  # --- 3. The Notification Service ---
+  # The "announcement system" for notifications, encrypted with our key
   ProcessingNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub "${ProjectName}-ProcessingNotifications"
+      TopicName: 'processing-notifications'
       KmsMasterKeyId: !Ref KMSKey
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
 
-  # --- 4. The "Mailbox" for failed Lambda executions ---
+  # The "error mailbox" for failed Lambda executions
   FailedExecutionsQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "${ProjectName}-FailedExecutionsQueue"
+      QueueName: 'processing-dlq'
       KmsMasterKeyId: !Ref KMSKey
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
 
 Outputs:
   KMSKeyArn:
-    Description: ARN of the master KMS Key.
+    Description: 'ARN of the master KMS Key.'
     Value: !GetAtt KMSKey.Arn
   DynamoDBTableName:
-    Description: Name of the DynamoDB table.
+    Description: 'Name of the DynamoDB table.'
     Value: !Ref FileMetadataTable
   SNSTopicArn:
-    Description: ARN of the SNS topic.
+    Description: 'ARN of the SNS topic.'
     Value: !Ref ProcessingNotificationTopic
   DeadLetterQueueArn:
-    Description: ARN of the Dead Letter Queue.
-    Value: !GetAtt FailedExecutionsQueue.Arn 
+    Description: 'ARN of the Dead Letter Queue.'
+    Value: !GetAtt FailedExecutionsQueue.Arn
