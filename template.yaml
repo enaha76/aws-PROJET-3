@@ -179,4 +179,4 @@ Outputs:
     Value: !Ref SNSTopic
   LambdaFunctionArn:
     Description: ARN of the data processing Lambda function.
-    Value: !GetAtt LambdaFunction.Arn
+    Value: !GetAtt LambdaFunction.Arn 
