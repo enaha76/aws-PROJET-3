@@ -87,123 +87,123 @@ Outputs:
 
 
 
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Stage 2 of 3: Application Core - S3 Bucket, Lambda Function, and IAM Role.'
+# AWSTemplateFormatVersion: '2010-09-09'
+# Description: 'Stage 2 of 3: Application Core - S3 Bucket, Lambda Function, and IAM Role.'
 
-Resources:
-  # --- Foundation Resources (from Stage 1) ---
-  KMSKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: 'Customer Managed Key for the text processing project'
-      EnableKeyRotation: true
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: 'AllowRootUserToAdministerKey'
-            Effect: 'Allow'
-            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
-            Action: 'kms:*'
-            Resource: '*'
+# Resources:
+#   # --- Foundation Resources (from Stage 1) ---
+#   KMSKey:
+#     Type: AWS::KMS::Key
+#     Properties:
+#       Description: 'Customer Managed Key for the text processing project'
+#       EnableKeyRotation: true
+#       KeyPolicy:
+#         Version: '2012-10-17'
+#         Statement:
+#           - Sid: 'AllowRootUserToAdministerKey'
+#             Effect: 'Allow'
+#             Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+#             Action: 'kms:*'
+#             Resource: '*'
       
-  FileMetadataTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: 'file-metadata-table'
-      AttributeDefinitions: [{ AttributeName: 'fileId', AttributeType: 'S' }]
-      KeySchema: [{ AttributeName: 'fileId', KeyType: 'HASH' }]
-      BillingMode: 'PAY_PER_REQUEST'
-      SSESpecification: { SSEEnabled: true, KMSMasterKeyId: !Ref KMSKey }
+#   FileMetadataTable:
+#     Type: AWS::DynamoDB::Table
+#     Properties:
+#       TableName: 'file-metadata-table'
+#       AttributeDefinitions: [{ AttributeName: 'fileId', AttributeType: 'S' }]
+#       KeySchema: [{ AttributeName: 'fileId', KeyType: 'HASH' }]
+#       BillingMode: 'PAY_PER_REQUEST'
+#       SSESpecification: { SSEEnabled: true, KMSMasterKeyId: !Ref KMSKey }
 
-  ProcessingNotificationTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: 'processing-notifications'
-      KmsMasterKeyId: !Ref KMSKey
+#   ProcessingNotificationTopic:
+#     Type: AWS::SNS::Topic
+#     Properties:
+#       TopicName: 'processing-notifications'
+#       KmsMasterKeyId: !Ref KMSKey
 
-  FailedExecutionsQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: 'processing-dlq'
-      KmsMasterKeyId: !Ref KMSKey
+#   FailedExecutionsQueue:
+#     Type: AWS::SQS::Queue
+#     Properties:
+#       QueueName: 'processing-dlq'
+#       KmsMasterKeyId: !Ref KMSKey
       
-  # --- Application Core Resources (New in Stage 2) ---
-  S3Bucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub '${AWS::AccountId}-processing-bucket-uploads'
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: 's3:ObjectCreated:*'
-            Function: !GetAtt DataProcessorFunction.Arn
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt KMSKey.Arn
+#   # --- Application Core Resources (New in Stage 2) ---
+#   S3Bucket:
+#     Type: AWS::S3::Bucket
+#     Properties:
+#       BucketName: !Sub '${AWS::AccountId}-processing-bucket-uploads'
+#       NotificationConfiguration:
+#         LambdaConfigurations:
+#           - Event: 's3:ObjectCreated:*'
+#             Function: !GetAtt DataProcessorFunction.Arn
+#       BucketEncryption:
+#         ServerSideEncryptionConfiguration:
+#           - ServerSideEncryptionByDefault:
+#               SSEAlgorithm: 'aws:kms'
+#               KMSMasterKeyID: !GetAtt KMSKey.Arn
 
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: 'Allow'
-            Principal: { Service: 'lambda.amazonaws.com' }
-            Action: 'sts:AssumeRole'
-      Policies:
-        - PolicyName: 'LambdaPermissions'
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: 'Allow'
-                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
-              - Effect: 'Allow'
-                Action: 's3:GetObject'
-                Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
-              - Effect: 'Allow'
-                Action: 'dynamodb:PutItem'
-                Resource: !GetAtt FileMetadataTable.Arn
-              - Effect: 'Allow'
-                Action: 'sns:Publish'
-                Resource: !Ref ProcessingNotificationTopic
-              - Effect: 'Allow'
-                Action: 'comprehend:DetectSentiment'
-                Resource: '*'
-              - Effect: 'Allow'
-                Action: ['kms:Decrypt', 'kms:GenerateDataKey']
-                Resource: !GetAtt KMSKey.Arn
-              - Effect: 'Allow'
-                Action: 'sqs:SendMessage'
-                Resource: !GetAtt FailedExecutionsQueue.Arn
+#   LambdaExecutionRole:
+#     Type: AWS::IAM::Role
+#     Properties:
+#       AssumeRolePolicyDocument:
+#         Version: '2012-10-17'
+#         Statement:
+#           - Effect: 'Allow'
+#             Principal: { Service: 'lambda.amazonaws.com' }
+#             Action: 'sts:AssumeRole'
+#       Policies:
+#         - PolicyName: 'LambdaPermissions'
+#           PolicyDocument:
+#             Version: '2012-10-17'
+#             Statement:
+#               - Effect: 'Allow'
+#                 Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+#                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+#               - Effect: 'Allow'
+#                 Action: 's3:GetObject'
+#                 Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+#               - Effect: 'Allow'
+#                 Action: 'dynamodb:PutItem'
+#                 Resource: !GetAtt FileMetadataTable.Arn
+#               - Effect: 'Allow'
+#                 Action: 'sns:Publish'
+#                 Resource: !Ref ProcessingNotificationTopic
+#               - Effect: 'Allow'
+#                 Action: 'comprehend:DetectSentiment'
+#                 Resource: '*'
+#               - Effect: 'Allow'
+#                 Action: ['kms:Decrypt', 'kms:GenerateDataKey']
+#                 Resource: !GetAtt KMSKey.Arn
+#               - Effect: 'Allow'
+#                 Action: 'sqs:SendMessage'
+#                 Resource: !GetAtt FailedExecutionsQueue.Arn
 
-  DataProcessorFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: 'data-processor-function'
-      Handler: 'lambda_function.lambda_handler'
-      Runtime: 'python3.9'
-      Role: !GetAtt LambdaExecutionRole.Arn
-      # CodePipeline will replace this with your code from src/lambda_function.py
-      Code:
-        ZipFile: " "
-      Environment:
-        Variables:
-          DYNAMODB_TABLE: !Ref FileMetadataTable
-          SNS_TOPIC: !Ref ProcessingNotificationTopic
-          LOG_LEVEL: "INFO"
-      DeadLetterConfig:
-        TargetArn: !GetAtt FailedExecutionsQueue.Arn
+#   DataProcessorFunction:
+#     Type: AWS::Lambda::Function
+#     Properties:
+#       FunctionName: 'data-processor-function'
+#       Handler: 'lambda_function.lambda_handler'
+#       Runtime: 'python3.9'
+#       Role: !GetAtt LambdaExecutionRole.Arn
+#       # CodePipeline will replace this with your code from src/lambda_function.py
+#       Code:
+#         ZipFile: " "
+#       Environment:
+#         Variables:
+#           DYNAMODB_TABLE: !Ref FileMetadataTable
+#           SNS_TOPIC: !Ref ProcessingNotificationTopic
+#           LOG_LEVEL: "INFO"
+#       DeadLetterConfig:
+#         TargetArn: !GetAtt FailedExecutionsQueue.Arn
 
-  S3InvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt DataProcessorFunction.Arn
-      Action: 'lambda:InvokeFunction'
-      Principal: 's3.amazonaws.com'
-      SourceArn: !GetAtt S3Bucket.Arn
-      SourceAccount: !Ref AWS::AccountId
+#   S3InvokePermission:
+#     Type: AWS::Lambda::Permission
+#     Properties:
+#       FunctionName: !GetAtt DataProcessorFunction.Arn
+#       Action: 'lambda:InvokeFunction'
+#       Principal: 's3.amazonaws.com'
+#       SourceArn: !GetAtt S3Bucket.Arn
+#       SourceAccount: !Ref AWS::AccountId
 
 
 
