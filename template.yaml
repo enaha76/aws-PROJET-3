@@ -1,76 +1,44 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Complete Serverless Text Processing with Sentiment Analysis (S3 -> Lambda -> DynamoDB + SNS + Bedrock)
+Description: >
+  Complete infrastructure for an event-driven data processing pipeline using S3, Lambda,
+  DynamoDB, SNS, and Comprehend.
 
 Parameters:
-  Email:
+  LogLevel:
     Type: String
-    Description: Email address for notifications
-    AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
-    ConstraintDescription: Must be a valid email address
-    Default: 21076@supnum.mr
-  
-  Environment:
+    Default: INFO
+    AllowedValues: [INFO, DEBUG, WARN, ERROR]
+    Description: Log level for the Lambda function.
+  ProjectName:
     Type: String
-    Description: Environment name
-    Default: prod
-    AllowedValues:
-      - dev
-      - staging
-      - prod
+    Default: PROJET-3
+    Description: The name of the project, used for resource naming and tagging.
 
 Resources:
-  # ===== SECURITY LAYER =====
-  
-  # KMS Key for encryption
+  # 1. KMS Key for encrypting the SNS Topic
   KMSKey:
     Type: AWS::KMS::Key
     Properties:
-      Description: KMS key for encrypting S3 bucket and DynamoDB
+      Description: KMS key for encrypting the SNS topic for the processing pipeline.
+      EnableKeyRotation: true
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
-          - Sid: Enable IAM User Permissions
+          - Sid: Allow administration of the key
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-            Action: 'kms:*'
-            Resource: '*'
-          - Sid: Allow services to use the key
-            Effect: Allow
-            Principal:
-              Service:
-                - s3.amazonaws.com
-                - dynamodb.amazonaws.com
-                - lambda.amazonaws.com
-                - logs.amazonaws.com
-            Action:
-              - 'kms:Decrypt'
-              - 'kms:GenerateDataKey'
-            Resource: '*'
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
       Tags:
         - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
+          Value: !Ref ProjectName
 
-  KMSKeyAlias:
-    Type: AWS::KMS::Alias
-    Properties:
-      AliasName: !Sub 'alias/sentiment-analysis-${Environment}'
-      TargetKeyId: !Ref KMSKey
-
-  # ===== STORAGE LAYER =====
-  
-  # S3 Bucket with KMS encryption
-  ProcessingBucket:
+  # 2. S3 Bucket to receive file uploads and trigger the Lambda
+  S3Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'sentiment-analysis-${AWS::AccountId}-${Environment}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt KMSKey.Arn
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${ProjectName}-processing-bucket"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -80,94 +48,43 @@ Resources:
         LambdaConfigurations:
           - Event: 's3:ObjectCreated:*'
             Function: !GetAtt LambdaFunction.Arn
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: suffix
-                    Value: .txt
-                  - Name: suffix
-                    Value: .pdf
       Tags:
         - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
+          Value: !Ref ProjectName
 
-  # S3 Bucket Policy
-  BucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref ProcessingBucket
-      PolicyDocument:
-        Statement:
-          - Sid: DenyInsecureConnections
-            Effect: Deny
-            Principal: '*'
-            Action: 's3:*'
-            Resource:
-              - !GetAtt ProcessingBucket.Arn
-              - !Sub '${ProcessingBucket.Arn}/*'
-            Condition:
-              Bool:
-                'aws:SecureTransport': 'false'
-
-  # ===== NOTIFICATION LAYER =====
-  
-  # SNS Topic
-  SNSTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub 'sentiment-analysis-notifications-${Environment}'
-      KmsMasterKeyId: !Ref KMSKey
-      Tags:
-        - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
-
-  # SNS Subscription
-  SNSSubscription:
-    Type: AWS::SNS::Subscription
-    Properties:
-      Protocol: email
-      Endpoint: !Ref Email
-      TopicArn: !Ref SNSTopic
-
-  # ===== DATABASE LAYER =====
-  
-  # DynamoDB Table with encryption
-  MetadataTable:
+  # 3. DynamoDB Table to store file metadata
+  DynamoDBTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub 'sentiment-analysis-metadata-${Environment}'
+      TableName: !Sub "${ProjectName}-FileMetadata"
       AttributeDefinitions:
-        - AttributeName: FileName
-          AttributeType: S
-        - AttributeName: ProcessedAt
+        - AttributeName: fileId
           AttributeType: S
       KeySchema:
-        - AttributeName: FileName
+        - AttributeName: fileId
           KeyType: HASH
-        - AttributeName: ProcessedAt
-          KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
       SSESpecification:
         SSEEnabled: true
-        SSEType: KMS
-        KMSMasterKeyId: !GetAtt KMSKey.Arn
       Tags:
         - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
+          Value: !Ref ProjectName
 
-  # ===== IAM LAYER =====
-  
-  # Lambda Execution Role
+  # 4. SNS Topic for sending notifications
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-ProcessingNotifications"
+      KmsMasterKeyId: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 5. IAM Role for the Lambda Function
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'sentiment-analysis-lambda-role-${Environment}'
+      RoleName: !Sub "${ProjectName}-LambdaExecutionRole"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -175,276 +92,88 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: SentimentAnalysisPolicy
+        - PolicyName: !Sub "${ProjectName}-LambdaPermissions"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # S3 permissions
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:GetObjectVersion
-                Resource: !Sub '${ProcessingBucket.Arn}/*'
-              
-              # DynamoDB permissions
-              - Effect: Allow
-                Action:
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                Resource: !GetAtt MetadataTable.Arn
-              
-              # SNS permissions
-              - Effect: Allow
-                Action:
-                  - sns:Publish
-                Resource: !Ref SNSTopic
-              
-              # Bedrock permissions
-              - Effect: Allow
-                Action:
-                  - bedrock:InvokeModel
-                Resource: 
-                  - arn:aws:bedrock:*::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0
-                  - arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
-              
-              # KMS permissions
-              - Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:GenerateDataKey
-                Resource: !GetAtt KMSKey.Arn
-              
-              # CloudWatch Logs permissions
-              - Effect: Allow
+              - Sid: AllowLogging
+                Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
-      Tags:
-        - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Sid: S3ReadAccess
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${S3Bucket.Arn}/*"
+              - Sid: DynamoDBWriteAccess
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt DynamoDBTable.Arn
+              - Sid: SNSPublishAccess
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SNSTopic
+              - Sid: ComprehendAccess
+                Effect: Allow
+                Action:
+                  - comprehend:DetectSentiment
+                  - comprehend:DetectEntities
+                  - comprehend:DetectDominantLanguage
+                Resource: "*"
+              - Sid: KMSAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                Resource: !GetAtt KMSKey.Arn
 
-  # ===== COMPUTE LAYER =====
-  
-  # Lambda Function
+  # 6. The Lambda Function itself
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub 'sentiment-analysis-processor-${Environment}'
-      Handler: index.lambda_handler
+      FunctionName: !Sub "${ProjectName}-DataProcessorFunction"
+      Handler: lambda_function.lambda_handler
       Runtime: python3.12
       Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 300
-      MemorySize: 1024
       Code:
-        S3Bucket: code-lambda-groupe21029-eun1
-        S3Key: code.zip
+        S3Bucket: # NOTE: You must upload your code zip to an S3 bucket first
+          Fn::Sub: "codepipeline-${AWS::Region}-YOUR-ACCOUNT-ID" # Replace with your CodePipeline artifact bucket
+        S3Key: "path/to/your/code.zip" # This will be managed by CodePipeline
       Environment:
         Variables:
-          TABLE_NAME: !Ref MetadataTable
-          TOPIC_ARN: !Ref SNSTopic
-          KMS_KEY_ID: !GetAtt KMSKey.Arn
-          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
-          ENVIRONMENT: !Ref Environment
+          DYNAMODB_TABLE: !Ref DynamoDBTable
+          SNS_TOPIC: !Ref SNSTopic
+          KMS_KEY_ID: !Ref KMSKey
+          LOG_LEVEL: !Ref LogLevel
+      Timeout: 60
+      MemorySize: 256
       Tags:
         - Key: Project
-          Value: SentimentAnalysis
-        - Key: Environment
-          Value: !Ref Environment
+          Value: !Ref ProjectName
 
-  # Lambda Permission for S3
-  LambdaInvokePermission:
+  # 7. Permission for S3 to invoke the Lambda function
+  S3InvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref LambdaFunction
+      FunctionName: !GetAtt LambdaFunction.Arn
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
-      SourceArn: !GetAtt ProcessingBucket.Arn
-
-  # ===== MONITORING LAYER =====
-  
-  # CloudWatch Log Group
-  LambdaLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/aws/lambda/${LambdaFunction}'
-      RetentionInDays: 30
-      KmsKeyId: !GetAtt KMSKey.Arn
-
-  # CloudWatch Alarms
-  LambdaErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub 'sentiment-analysis-lambda-errors-${Environment}'
-      AlarmDescription: Alert when Lambda function has errors
-      MetricName: Errors
-      Namespace: AWS/Lambda
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref LambdaFunction
-      AlarmActions:
-        - !Ref SNSTopic
-      TreatMissingData: notBreaching
-
-  LambdaThrottleAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub 'sentiment-analysis-lambda-throttles-${Environment}'
-      AlarmDescription: Alert when Lambda function is throttled
-      MetricName: Throttles
-      Namespace: AWS/Lambda
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 5
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref LambdaFunction
-      AlarmActions:
-        - !Ref SNSTopic
-      TreatMissingData: notBreaching
-
-  # CloudWatch Dashboard
-  MonitoringDashboard:
-    Type: AWS::CloudWatch::Dashboard
-    Properties:
-      DashboardName: !Sub 'sentiment-analysis-${Environment}'
-      DashboardBody: !Sub |
-        {
-          "widgets": [
-            {
-              "type": "metric",
-              "properties": {
-                "metrics": [
-                  ["AWS/Lambda", "Invocations", {"stat": "Sum"}],
-                  [".", "Errors", {"stat": "Sum"}],
-                  [".", "Duration", {"stat": "Average"}],
-                  [".", "Throttles", {"stat": "Sum"}]
-                ],
-                "period": 300,
-                "stat": "Average",
-                "region": "${AWS::Region}",
-                "title": "Lambda Metrics",
-                "dimensions": [["FunctionName", "${LambdaFunction}"]]
-              }
-            },
-            {
-              "type": "log",
-              "properties": {
-                "query": "SOURCE '${LambdaLogGroup}' | fields @timestamp, @message | sort @timestamp desc | limit 20",
-                "region": "${AWS::Region}",
-                "title": "Recent Logs"
-              }
-            }
-          ]
-        }
-
-  # CloudTrail for auditing
-  CloudTrailBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub 'sentiment-analysis-trail-${AWS::AccountId}-${Environment}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt KMSKey.Arn
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldLogs
-            Status: Enabled
-            ExpirationInDays: 90
-
-  CloudTrailBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref CloudTrailBucket
-      PolicyDocument:
-        Statement:
-          - Sid: AWSCloudTrailAclCheck
-            Effect: Allow
-            Principal:
-              Service: cloudtrail.amazonaws.com
-            Action: 's3:GetBucketAcl'
-            Resource: !GetAtt CloudTrailBucket.Arn
-          - Sid: AWSCloudTrailWrite
-            Effect: Allow
-            Principal:
-              Service: cloudtrail.amazonaws.com
-            Action: 's3:PutObject'
-            Resource: !Sub '${CloudTrailBucket.Arn}/*'
-            Condition:
-              StringEquals:
-                's3:x-amz-acl': 'bucket-owner-full-control'
-
-  Trail:
-    Type: AWS::CloudTrail::Trail
-    DependsOn: CloudTrailBucketPolicy
-    Properties:
-      TrailName: !Sub 'sentiment-analysis-trail-${Environment}'
-      S3BucketName: !Ref CloudTrailBucket
-      IncludeGlobalServiceEvents: true
-      IsLogging: true
-      IsMultiRegionTrail: true
-      EventSelectors:
-        - ReadWriteType: All
-          IncludeManagementEvents: true
-          DataResources:
-            - Type: 'AWS::S3::Object'
-              Values:
-                - !Sub '${ProcessingBucket.Arn}/'
-            - Type: 'AWS::DynamoDB::Table'
-              Values:
-                - !GetAtt MetadataTable.Arn
+      SourceArn: !GetAtt S3Bucket.Arn
+      SourceAccount: !Ref AWS::AccountId
 
 Outputs:
-  BucketName:
-    Description: S3 Bucket for uploading files
-    Value: !Ref ProcessingBucket
-    Export:
-      Name: !Sub '${AWS::StackName}-BucketName'
-  
-  TableName:
-    Description: DynamoDB Table Name
-    Value: !Ref MetadataTable
-    Export:
-      Name: !Sub '${AWS::StackName}-TableName'
-  
-  TopicArn:
-    Description: SNS Topic ARN
+  S3BucketName:
+    Description: Name of the S3 bucket for file uploads.
+    Value: !Ref S3Bucket
+  DynamoDBTableName:
+    Description: Name of the DynamoDB table for metadata.
+    Value: !Ref DynamoDBTable
+  SNSTopicArn:
+    Description: ARN of the SNS topic for notifications.
     Value: !Ref SNSTopic
-    Export:
-      Name: !Sub '${AWS::StackName}-TopicArn'
-  
   LambdaFunctionArn:
-    Description: Lambda Function ARN
+    Description: ARN of the data processing Lambda function.
     Value: !GetAtt LambdaFunction.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-LambdaArn'
-  
-  KMSKeyArn:
-    Description: KMS Key ARN
-    Value: !GetAtt KMSKey.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-KMSKeyArn'
-  
-  DashboardURL:
-    Description: CloudWatch Dashboard URL
-    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${MonitoringDashboard}'
