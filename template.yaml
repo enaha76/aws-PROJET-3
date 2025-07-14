@@ -1,13 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Task 1 of 3: Building the foundation - Security (KMS), Storage (DynamoDB),
-  and Notifications (SNS, SQS).
+  Task 1 of 3: Building the foundation - Security (KMS), Storage (DynamoDB), 
+  and Notifications (SNS, SQS). v2 - Fixes KMS policy.
 
 Parameters:
   ProjectName:
     Type: String
     Default: PROJET-3
     Description: A name for your project, used to name all the resources.
+  CodePipelineRoleArn:
+    Type: String
+    Description: The full ARN of the IAM role used by the CodePipeline Deploy stage.
 
 Resources:
   # --- 1. The Master Key to lock everything ---
@@ -19,11 +22,33 @@ Resources:
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
-          - Sid: Allow administration of the key
+          # Statement 1: Allows the account root user full control
+          - Sid: AllowRootUserToAdministerKey
             Effect: Allow
             Principal:
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
             Action: "kms:*"
+            Resource: "*"
+          # Statement 2 (FIX): Allows the pipeline's role to manage the key
+          - Sid: AllowPipelineRoleToManageKey
+            Effect: Allow
+            Principal:
+              AWS: !Ref CodePipelineRoleArn
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:TagResource"
+              - "kms:UntagResource"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
             Resource: "*"
       Tags:
         - Key: Project
@@ -76,7 +101,7 @@ Outputs:
     Description: Name of the DynamoDB table.
     Value: !Ref FileMetadataTable
   SNSTopicArn:
-    Description: ARN of the SNS topic. 
+    Description: ARN of the SNS topic.
     Value: !Ref ProcessingNotificationTopic
   DeadLetterQueueArn:
     Description: ARN of the Dead Letter Queue.
