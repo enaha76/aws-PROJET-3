@@ -1,73 +1,365 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
-Description: 'Text processing pipeline with CloudWatch monitoring - PROJET-3-GROUP-21029-21076-21047-24265'
+Description: Complete Serverless Text Processing with Sentiment Analysis (S3 -> Lambda -> DynamoDB + SNS + Bedrock)
 
 Parameters:
-  NotificationEmail:
+  Email:
     Type: String
-    Description: 'Email address for notifications'
-    Default: '21076@supnum.mr'
-    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
-
-Globals:
-  Function:
-    Runtime: python3.9
-    Timeout: 300
-    MemorySize: 256
-    Environment:
-      Variables:
-        LOG_LEVEL: INFO
+    Description: Email address for notifications
+    AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
+    ConstraintDescription: Must be a valid email address
+  
+  Environment:
+    Type: String
+    Description: Environment name
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
 
 Resources:
-  # S3 Bucket for uploads
+  # ===== SECURITY LAYER =====
+  
+  # KMS Key for encryption
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting S3 bucket and DynamoDB
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow services to use the key
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+                - dynamodb.amazonaws.com
+                - lambda.amazonaws.com
+                - logs.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
+
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/sentiment-analysis-${Environment}'
+      TargetKeyId: !Ref KMSKey
+
+  # ===== STORAGE LAYER =====
+  
+  # S3 Bucket with KMS encryption
   ProcessingBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'processing-uploads-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Sub 'sentiment-analysis-${AWS::AccountId}-${Environment}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt KMSKey.Arn
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      LoggingConfiguration:
-        DestinationBucketName: !Ref LoggingBucket
-        LogFilePrefix: 'access-logs/'
       NotificationConfiguration:
         LambdaConfigurations:
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt DataProcessorFunction.Arn
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt LambdaFunction.Arn
             Filter:
               S3Key:
                 Rules:
                   - Name: suffix
                     Value: .txt
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt DataProcessorFunction.Arn
-            Filter:
-              S3Key:
-                Rules:
                   - Name: suffix
-                    Value: .json
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt DataProcessorFunction.Arn
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: suffix
-                    Value: .md
+                    Value: .pdf
       Tags:
-        - Key: Name
-          Value: !Sub 'processing-uploads-${AWS::StackName}'
         - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
 
-  # S3 Bucket for Logging
-  LoggingBucket:
+  # S3 Bucket Policy
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProcessingBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ProcessingBucket.Arn
+              - !Sub '${ProcessingBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # ===== NOTIFICATION LAYER =====
+  
+  # SNS Topic
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'sentiment-analysis-notifications-${Environment}'
+      KmsMasterKeyId: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SNS Subscription
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref Email
+      TopicArn: !Ref SNSTopic
+
+  # ===== DATABASE LAYER =====
+  
+  # DynamoDB Table with encryption
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'sentiment-analysis-metadata-${Environment}'
+      AttributeDefinitions:
+        - AttributeName: FileName
+          AttributeType: S
+        - AttributeName: ProcessedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: FileName
+          KeyType: HASH
+        - AttributeName: ProcessedAt
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt KMSKey.Arn
+      Tags:
+        - Key: Project
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===== IAM LAYER =====
+  
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'sentiment-analysis-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SentimentAnalysisPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 permissions
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub '${ProcessingBucket.Arn}/*'
+              
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt MetadataTable.Arn
+              
+              # SNS permissions
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SNSTopic
+              
+              # Bedrock permissions
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: 
+                  - arn:aws:bedrock:*::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0
+                  - arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
+              
+              # KMS permissions
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt KMSKey.Arn
+              
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      Tags:
+        - Key: Project
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===== COMPUTE LAYER =====
+  
+  # Lambda Function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'sentiment-analysis-processor-${Environment}'
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Code:
+        S3Bucket: code-lambda-groupe21029-eun1
+        S3Key: code.zip
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MetadataTable
+          TOPIC_ARN: !Ref SNSTopic
+          KMS_KEY_ID: !GetAtt KMSKey.Arn
+          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+          ENVIRONMENT: !Ref Environment
+      Tags:
+        - Key: Project
+          Value: SentimentAnalysis
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Permission for S3
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt ProcessingBucket.Arn
+
+  # ===== MONITORING LAYER =====
+  
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LambdaFunction}'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt KMSKey.Arn
+
+  # CloudWatch Alarms
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sentiment-analysis-lambda-errors-${Environment}'
+      AlarmDescription: Alert when Lambda function has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunction
+      AlarmActions:
+        - !Ref SNSTopic
+      TreatMissingData: notBreaching
+
+  LambdaThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sentiment-analysis-lambda-throttles-${Environment}'
+      AlarmDescription: Alert when Lambda function is throttled
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaFunction
+      AlarmActions:
+        - !Ref SNSTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Dashboard
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'sentiment-analysis-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum"}],
+                  [".", "Errors", {"stat": "Sum"}],
+                  [".", "Duration", {"stat": "Average"}],
+                  [".", "Throttles", {"stat": "Sum"}]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Lambda Metrics",
+                "dimensions": [["FunctionName", "${LambdaFunction}"]]
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '${LambdaLogGroup}' | fields @timestamp, @message | sort @timestamp desc | limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Logs"
+              }
+            }
+          ]
+        }
+
+  # CloudTrail for auditing
+  CloudTrailBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'processing-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Sub 'sentiment-analysis-trail-${AWS::AccountId}-${Environment}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt KMSKey.Arn
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -78,483 +370,80 @@ Resources:
           - Id: DeleteOldLogs
             Status: Enabled
             ExpirationInDays: 90
-      Tags:
-        - Key: Name
-          Value: !Sub 'processing-logs-${AWS::StackName}'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
 
-  # DynamoDB Table
-  FileMetadataTable:
-    Type: AWS::DynamoDB::Table
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
     Properties:
-      TableName: !Sub 'file-metadata-${AWS::StackName}'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: fileId
-          AttributeType: S
-        - AttributeName: fileName
-          AttributeType: S
-      KeySchema:
-        - AttributeName: fileId
-          KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: FileNameIndex
-          KeySchema:
-            - AttributeName: fileName
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
-      StreamSpecification:
-        StreamViewType: NEW_AND_OLD_IMAGES
-      Tags:
-        - Key: Name
-          Value: !Sub 'file-metadata-${AWS::StackName}'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt CloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${CloudTrailBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
 
-  # SNS Topic
-  ProcessingNotifications:
-    Type: AWS::SNS::Topic
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
     Properties:
-      TopicName: !Sub 'processing-notifications-${AWS::StackName}'
-      DisplayName: 'Text Processing Notifications'
-      Tags:
-        - Key: Name
-          Value: !Sub 'processing-notifications-${AWS::StackName}'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  # SNS Email Subscription
-  EmailSubscription:
-    Type: AWS::SNS::Subscription
-    Properties:
-      Protocol: email
-      TopicArn: !Ref ProcessingNotifications
-      Endpoint: !Ref NotificationEmail
-
-  # Dead Letter Queue
-  ProcessingDeadLetterQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: !Sub 'processing-dlq-${AWS::StackName}'
-      MessageRetentionPeriod: 1209600  # 14 days
-      VisibilityTimeoutSeconds: 300
-      Tags:
-        - Key: Name
-          Value: !Sub 'processing-dlq-${AWS::StackName}'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  # CloudWatch Log Group for Lambda
-  LambdaLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/aws/lambda/data-processor-${AWS::StackName}'
-      RetentionInDays: 30
-      Tags:
-        - Key: Name
-          Value: !Sub 'lambda-logs-${AWS::StackName}'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  # Lambda Function
-  DataProcessorFunction:
-    Type: AWS::Serverless::Function
-    DependsOn: LambdaLogGroup
-    Properties:
-      FunctionName: !Sub 'data-processor-${AWS::StackName}'
-      CodeUri: src/
-      Handler: lambda_function.lambda_handler
-      Environment:
-        Variables:
-          DYNAMODB_TABLE: !Ref FileMetadataTable
-          SNS_TOPIC: !Ref ProcessingNotifications
-          PROJECT_NAME: 'PROJET-3-GROUP-21029-21076-21047-24265'
-      DeadLetterQueue:
-        Type: SQS
-        TargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
-      ReservedConcurrencyLimit: 10
-      Tracing: Active
-      Policies:
-        - S3ReadPolicy:
-            BucketName: !Ref ProcessingBucket
-        - DynamoDBWritePolicy:
-            TableName: !Ref FileMetadataTable
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt ProcessingNotifications.TopicName
-        - SQSSendMessagePolicy:
-            QueueName: !GetAtt ProcessingDeadLetterQueue.QueueName
-        - Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Action:
-                - comprehend:DetectSentiment
-                - comprehend:DetectEntities
-                - comprehend:DetectLanguage
-              Resource: '*'
-            - Effect: Allow
-              Action:
-                - logs:CreateLogGroup
-                - logs:CreateLogStream
-                - logs:PutLogEvents
-              Resource: '*'
-            - Effect: Allow
-              Action:
-                - xray:PutTraceSegments
-                - xray:PutTelemetryRecords
-              Resource: '*'
-      Tags:
-        Name: !Sub 'data-processor-${AWS::StackName}'
-        Project: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        Service: 'text-processing'
-
-  # Lambda Permission for S3
-  S3InvokeLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref DataProcessorFunction
-      Principal: s3.amazonaws.com
-      SourceArn: !Sub '${ProcessingBucket}/*'
-
-  # CloudWatch Alarms
-  LambdaErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-lambda-errors'
-      AlarmDescription: 'Lambda function error rate alarm'
-      MetricName: Errors
-      Namespace: AWS/Lambda
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 3
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref DataProcessorFunction
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      OKActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-lambda-errors'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  LambdaDurationAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-lambda-duration'
-      AlarmDescription: 'Lambda function duration alarm'
-      MetricName: Duration
-      Namespace: AWS/Lambda
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 240000  # 4 minutes in milliseconds
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref DataProcessorFunction
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-lambda-duration'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  LambdaThrottleAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-lambda-throttles'
-      AlarmDescription: 'Lambda function throttle alarm'
-      MetricName: Throttles
-      Namespace: AWS/Lambda
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref DataProcessorFunction
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-lambda-throttles'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  DLQAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-dlq-messages'
-      AlarmDescription: 'Dead Letter Queue messages alarm'
-      MetricName: ApproximateNumberOfVisibleMessages
-      Namespace: AWS/SQS
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      Dimensions:
-        - Name: QueueName
-          Value: !GetAtt ProcessingDeadLetterQueue.QueueName
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-dlq-messages'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  DynamoDBThrottleAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-dynamodb-throttles'
-      AlarmDescription: 'DynamoDB throttle events alarm'
-      MetricName: ThrottledRequests
-      Namespace: AWS/DynamoDB
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 5
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: TableName
-          Value: !Ref FileMetadataTable
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-dynamodb-throttles'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  S3ErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${AWS::StackName}-s3-errors'
-      AlarmDescription: 'S3 4xx and 5xx errors alarm'
-      MetricName: 4xxErrors
-      Namespace: AWS/S3
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 5
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: BucketName
-          Value: !Ref ProcessingBucket
-      AlarmActions:
-        - !Ref ProcessingNotifications
-      TreatMissingData: notBreaching
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-s3-errors'
-        - Key: Project
-          Value: 'PROJET-3-GROUP-21029-21076-21047-24265'
-        - Key: Service
-          Value: 'text-processing'
-
-  # CloudWatch Dashboard
-  ProcessingDashboard:
-    Type: AWS::CloudWatch::Dashboard
-    Properties:
-      DashboardName: !Sub '${AWS::StackName}-text-processing-dashboard'
-      DashboardBody: !Sub |
-        {
-          "widgets": [
-            {
-              "type": "metric",
-              "x": 0,
-              "y": 0,
-              "width": 12,
-              "height": 6,
-              "properties": {
-                "metrics": [
-                  [ "AWS/Lambda", "Invocations", "FunctionName", "${DataProcessorFunction}" ],
-                  [ ".", "Errors", ".", "." ],
-                  [ ".", "Duration", ".", "." ],
-                  [ ".", "Throttles", ".", "." ]
-                ],
-                "view": "timeSeries",
-                "stacked": false,
-                "region": "${AWS::Region}",
-                "title": "Lambda Function Metrics",
-                "period": 300
-              }
-            },
-            {
-              "type": "metric",
-              "x": 12,
-              "y": 0,
-              "width": 12,
-              "height": 6,
-              "properties": {
-                "metrics": [
-                  [ "AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${FileMetadataTable}" ],
-                  [ ".", "ConsumedWriteCapacityUnits", ".", "." ],
-                  [ ".", "ThrottledRequests", ".", "." ]
-                ],
-                "view": "timeSeries",
-                "stacked": false,
-                "region": "${AWS::Region}",
-                "title": "DynamoDB Table Metrics",
-                "period": 300
-              }
-            },
-            {
-              "type": "metric",
-              "x": 0,
-              "y": 6,
-              "width": 12,
-              "height": 6,
-              "properties": {
-                "metrics": [
-                  [ "AWS/S3", "NumberOfObjects", "BucketName", "${ProcessingBucket}", "StorageType", "AllStorageTypes" ],
-                  [ ".", "BucketSizeBytes", ".", ".", ".", "StandardStorage" ]
-                ],
-                "view": "timeSeries",
-                "stacked": false,
-                "region": "${AWS::Region}",
-                "title": "S3 Bucket Metrics",
-                "period": 86400
-              }
-            },
-            {
-              "type": "metric",
-              "x": 12,
-              "y": 6,
-              "width": 12,
-              "height": 6,
-              "properties": {
-                "metrics": [
-                  [ "AWS/SNS", "NumberOfMessagesPublished", "TopicName", "${ProcessingNotifications}" ],
-                  [ "AWS/SQS", "ApproximateNumberOfVisibleMessages", "QueueName", "${ProcessingDeadLetterQueue}" ]
-                ],
-                "view": "timeSeries",
-                "stacked": false,
-                "region": "${AWS::Region}",
-                "title": "Messaging Metrics",
-                "period": 300
-              }
-            },
-            {
-              "type": "log",
-              "x": 0,
-              "y": 12,
-              "width": 24,
-              "height": 6,
-              "properties": {
-                "query": "SOURCE '/aws/lambda/${DataProcessorFunction}'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 20",
-                "region": "${AWS::Region}",
-                "title": "Recent Lambda Errors",
-                "view": "table"
-              }
-            }
-          ]
-        }
-
-  # CloudWatch Log Insights Queries
-  ErrorAnalysisQuery:
-    Type: AWS::CloudWatch::QueryDefinition
-    Properties:
-      Name: !Sub '${AWS::StackName}-error-analysis'
-      LogGroupNames:
-        - !Ref LambdaLogGroup
-      QueryString: |
-        fields @timestamp, @message
-        | filter @message like /ERROR/
-        | stats count() by bin(5m)
-        | sort @timestamp desc
-
-  ProcessingStatsQuery:
-    Type: AWS::CloudWatch::QueryDefinition
-    Properties:
-      Name: !Sub '${AWS::StackName}-processing-stats'
-      LogGroupNames:
-        - !Ref LambdaLogGroup
-      QueryString: |
-        fields @timestamp, @message
-        | filter @message like /Successfully processed/
-        | stats count() by bin(1h)
-        | sort @timestamp desc
-
-  SentimentAnalysisQuery:
-    Type: AWS::CloudWatch::QueryDefinition
-    Properties:
-      Name: !Sub '${AWS::StackName}-sentiment-analysis'
-      LogGroupNames:
-        - !Ref LambdaLogGroup
-      QueryString: |
-        fields @timestamp, @message
-        | filter @message like /Sentiment analysis completed/
-        | parse @message /Sentiment analysis completed: (?<sentiment>\w+)/
-        | stats count() by sentiment
-        | sort count desc
+      TrailName: !Sub 'sentiment-analysis-trail-${Environment}'
+      S3BucketName: !Ref CloudTrailBucket
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: 'AWS::S3::Object'
+              Values:
+                - !Sub '${ProcessingBucket.Arn}/'
+            - Type: 'AWS::DynamoDB::Table'
+              Values:
+                - !GetAtt MetadataTable.Arn
 
 Outputs:
-  S3BucketName:
-    Description: 'Upload bucket name'
+  BucketName:
+    Description: S3 Bucket for uploading files
     Value: !Ref ProcessingBucket
-    
-  DynamoDBTableName:
-    Description: 'DynamoDB table name'
-    Value: !Ref FileMetadataTable
-    
-  LambdaFunctionName:
-    Description: 'Lambda function name'
-    Value: !Ref DataProcessorFunction
-    
-  SNSTopicArn:
-    Description: 'SNS topic ARN'
-    Value: !Ref ProcessingNotifications
-
-  CloudWatchDashboard:
-    Description: 'CloudWatch Dashboard URL'
-    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-text-processing-dashboard'
-
-  LambdaLogGroup:
-    Description: 'Lambda CloudWatch Log Group'
-    Value: !Ref LambdaLogGroup
-
-  TestCommand:
-    Description: 'Test command'
-    Value: !Sub 'aws s3 cp test.txt s3://${ProcessingBucket}/'
-
-  MonitoringInfo:
-    Description: 'Monitoring resources created'
-    Value: !Sub 'Dashboard: ${ProcessingDashboard}, Alarms: 6, Log Groups: 1, Log Insights Queries: 3'
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+  
+  TableName:
+    Description: DynamoDB Table Name
+    Value: !Ref MetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+  
+  TopicArn:
+    Description: SNS Topic ARN
+    Value: !Ref SNSTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-TopicArn'
+  
+  LambdaFunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+  
+  KMSKeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt KMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
+  
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${MonitoringDashboard}'
