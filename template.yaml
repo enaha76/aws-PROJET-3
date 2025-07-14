@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Stage 1 of 3: Foundation - KMS Key, DynamoDB Table, SNS Topic, and SQS Queue.'
+Description: 'Final Stage 1: Foundation with corrected KMS Policy.'
 
 Resources:
-  # The master key that will encrypt everything
   KMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -11,14 +10,21 @@ Resources:
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
+          # Rule 1: Gives your main account full control
           - Sid: 'AllowRootUserToAdministerKey'
             Effect: 'Allow'
             Principal:
               AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
+          # Rule 2 (FIX): Gives your pipeline's role full control
+          - Sid: 'AllowPipelineRoleToManageKey'
+            Effect: 'Allow'
+            Principal:
+              AWS: "arn:aws:iam::242198490044:role/CodePipelineStarterTemplate-Depl-CloudFormationRole-LMdrMLO8ig1I" # <-- REPLACE THIS VALUE
+            Action: "kms:*"
+            Resource: "*"
 
-  # The "filing cabinet" for storing results, encrypted with our key
   FileMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -34,30 +40,14 @@ Resources:
         SSEEnabled: true
         KMSMasterKeyId: !Ref KMSKey
 
-  # The "announcement system" for notifications, encrypted with our key
   ProcessingNotificationTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: 'processing-notifications'
       KmsMasterKeyId: !Ref KMSKey
 
-  # The "error mailbox" for failed Lambda executions
   FailedExecutionsQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: 'processing-dlq'
       KmsMasterKeyId: !Ref KMSKey
-
-Outputs:
-  KMSKeyArn:
-    Description: 'ARN of the master KMS Key.'
-    Value: !GetAtt KMSKey.Arn
-  DynamoDBTableName:
-    Description: 'Name of the DynamoDB table.'
-    Value: !Ref FileMetadataTable
-  SNSTopicArn:
-    Description: 'ARN of the SNS topic.'
-    Value: !Ref ProcessingNotificationTopic
-  DeadLetterQueueArn:
-    Description: 'ARN of the Dead Letter Queue.'
-    Value: !GetAtt FailedExecutionsQueue.Arn
