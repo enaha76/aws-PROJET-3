@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Complete infrastructure for an event-driven data processing pipeline using S3, Lambda,
-  DynamoDB, SNS, and Comprehend.
+  DynamoDB, SNS, and Comprehend. (v2 - Fixes circular dependency)
 
 Parameters:
   LogLevel:
@@ -138,10 +138,13 @@ Resources:
       Handler: lambda_function.lambda_handler
       Runtime: python3.12
       Role: !GetAtt LambdaExecutionRole.Arn
+      # This inline code is a placeholder. CodePipeline will replace it with your actual code.
       Code:
-        S3Bucket: # NOTE: You must upload your code zip to an S3 bucket first
-          Fn::Sub: "codepipeline-${AWS::Region}-YOUR-ACCOUNT-ID" # Replace with your CodePipeline artifact bucket
-        S3Key: "path/to/your/code.zip" # This will be managed by CodePipeline
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              print("This is a placeholder function. Code will be updated by the pipeline.")
+              return {'statusCode': 200, 'body': json.dumps('Placeholder')}
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref DynamoDBTable
