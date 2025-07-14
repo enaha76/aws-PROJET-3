@@ -221,15 +221,16 @@
 
 
 
-
-
-
-
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Final, unified template that solves the circular dependency by separating the IAM S3 policy.'
+Description: 'Final, unified template that solves all dependency and policy issues.'
+
+Parameters:
+  CodePipelineRoleArn:
+    Type: String
+    Description: The full ARN of the IAM role used by the CodePipeline Deploy stage.
 
 Resources:
-  # --- 1. Security & Foundation Resources ---
+  # --- Security & Foundation ---
   KMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -243,7 +244,12 @@ Resources:
             Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
             Action: 'kms:*'
             Resource: '*'
-      
+          - Sid: 'AllowPipelineRoleToManageKey'
+            Effect: 'Allow'
+            Principal: { AWS: !Ref CodePipelineRoleArn }
+            Action: 'kms:*'
+            Resource: '*'
+
   FileMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -264,8 +270,8 @@ Resources:
     Properties:
       QueueName: 'processing-dlq'
       KmsMasterKeyId: !Ref KMSKey
-      
-  # --- 2. Application Core Resources ---
+
+  # --- Application Core ---
   S3Bucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -276,11 +282,8 @@ Resources:
             Function: !GetAtt DataProcessorFunction.Arn
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'aws:kms'
-              KMSMasterKeyID: !GetAtt KMSKey.Arn
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: 'aws:kms', KMSMasterKeyID: !GetAtt KMSKey.Arn }
 
-  # This IAM Role is created WITHOUT S3 permission to break the dependency loop
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -295,26 +298,13 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: 'Allow'
-                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
-              - Effect: 'Allow'
-                Action: 'dynamodb:PutItem'
-                Resource: !GetAtt FileMetadataTable.Arn
-              - Effect: 'Allow'
-                Action: 'sns:Publish'
-                Resource: !Ref ProcessingNotificationTopic
-              - Effect: 'Allow'
-                Action: 'comprehend:DetectSentiment'
-                Resource: '*'
-              - Effect: 'Allow'
-                Action: ['kms:Decrypt', 'kms:GenerateDataKey']
-                Resource: !GetAtt KMSKey.Arn
-              - Effect: 'Allow'
-                Action: 'sqs:SendMessage'
-                Resource: !GetAtt FailedExecutionsQueue.Arn
+              - { Effect: 'Allow', Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*' }
+              - { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: !GetAtt FileMetadataTable.Arn }
+              - { Effect: 'Allow', Action: 'sns:Publish', Resource: !Ref ProcessingNotificationTopic }
+              - { Effect: 'Allow', Action: 'comprehend:DetectSentiment', Resource: '*' }
+              - { Effect: 'Allow', Action: ['kms:Decrypt', 'kms:GenerateDataKey'], Resource: !GetAtt KMSKey.Arn }
+              - { Effect: 'Allow', Action: 'sqs:SendMessage', Resource: !GetAtt FailedExecutionsQueue.Arn }
 
-  # THE FIX: The S3 Read Permission is added separately HERE, after the bucket exists
   LambdaS3ReadPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -323,11 +313,8 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Effect: 'Allow'
-            Action: 's3:GetObject'
-            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+          - { Effect: 'Allow', Action: 's3:GetObject', Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*' }
 
-  # The Lambda Function that does the processing
   DataProcessorFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -335,9 +322,7 @@ Resources:
       Handler: 'lambda_function.lambda_handler'
       Runtime: 'python3.9'
       Role: !GetAtt LambdaExecutionRole.Arn
-      Code:
-        # CodePipeline will replace this placeholder with your real python code
-        ZipFile: " " 
+      Code: { ZipFile: " " }
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref FileMetadataTable
@@ -346,7 +331,6 @@ Resources:
       DeadLetterConfig:
         TargetArn: !GetAtt FailedExecutionsQueue.Arn
 
-  # The permission that allows S3 to trigger the Lambda
   S3InvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
