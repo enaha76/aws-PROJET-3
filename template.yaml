@@ -105,4 +105,4 @@ Outputs:
     Value: !Ref ProcessingNotificationTopic
   DeadLetterQueueArn:
     Description: ARN of the Dead Letter Queue.
-    Value: !GetAtt FailedExecutionsQueue.Arn
+    Value: !GetAtt FailedExecutionsQueue.Arn 
