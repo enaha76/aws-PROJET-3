@@ -76,7 +76,7 @@ Outputs:
     Description: Name of the DynamoDB table.
     Value: !Ref FileMetadataTable
   SNSTopicArn:
-    Description: ARN of the SNS topic.
+    Description: ARN of the SNS topic. 
     Value: !Ref ProcessingNotificationTopic
   DeadLetterQueueArn:
     Description: ARN of the Dead Letter Queue.
